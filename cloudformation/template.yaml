@@ -34,10 +34,22 @@ Resources:
     Properties:
       VpcId: !Ref PipelineVPC
       CidrBlock: 10.0.1.0/24
+      AvailabilityZone: us-east-1a
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
           Value: studentlab-pipeline-subnet
+
+  PipelineSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PipelineVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: us-east-1b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: studentlab-pipeline-subnet-b
 
   PipelineInternetGateway:
     Type: AWS::EC2::InternetGateway
@@ -68,10 +80,16 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref PipelineInternetGateway
 
-  PublicSubnetRouteTableAssociation:
+  PublicSubnetRouteTableAssociationA:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PipelineSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PipelineSubnetB
       RouteTableId: !Ref PublicRouteTable
 
   EC2SecurityGroup:
@@ -92,6 +110,48 @@ Resources:
       Tags:
         - Key: Name
           Value: studentlab-pipeline-sg
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for public Load Balancer
+      VpcId: !Ref PipelineVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: studentlab-alb-sg
+
+  StreamlitSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Streamlit instance behind ALB
+      VpcId: !Ref PipelineVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8501
+          ToPort: 8501
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: studentlab-streamlit-sg
 
   S3Bucket:
     Type: AWS::S3::Bucket
@@ -138,7 +198,83 @@ Resources:
           chmod +x /home/ec2-user/read_s3.py
           python3 /home/ec2-user/read_s3.py
 
+  StreamlitInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref StreamlitSecurityGroup
+          SubnetId: !Ref PipelineSubnet
+      IamInstanceProfile: !Ref InstanceProfileName
+      ImageId: !Ref LatestAmiId
+      KeyName: !If [ UseKeyPair, !Ref KeyName, !Ref AWS::NoValue ]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y python3 python3-pip
+          python3 -m pip install --upgrade pip
+          pip3 install streamlit
+          cat <<'EOF' >/home/ec2-user/streamlit_app.py
+          import streamlit as st
+
+          st.title('Streamlit Teste AWS EC2')
+          st.write('Este é um app de teste hospedado em EC2.')
+          if st.button('Clique aqui'):
+              st.success('App ativo!')
+          EOF
+          chown ec2-user:ec2-user /home/ec2-user/streamlit_app.py
+          mkdir -p /tmp/streamlit
+          nohup streamlit run /home/ec2-user/streamlit_app.py --server.port 8501 --server.address 0.0.0.0 > /tmp/streamlit/streamlit.log 2>&1 &
+
+  StreamlitLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: studentlab-streamlit-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PipelineSubnet
+        - !Ref PipelineSubnetB
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: studentlab-streamlit-alb
+
+  StreamlitTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: studentlab-streamlit-tg
+      Port: 8501
+      Protocol: HTTP
+      VpcId: !Ref PipelineVPC
+      TargetType: instance
+      Targets:
+        - Id: !Ref StreamlitInstance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200
+
+  StreamlitListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref StreamlitLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref StreamlitTargetGroup
+
 Outputs:
+  StreamlitLoadBalancerDNS:
+    Value: !GetAtt StreamlitLoadBalancer.DNSName
+    Description: DNS público do ALB que expõe o Streamlit app.
+
   BucketName:
     Value: !Ref S3Bucket
     Description: Nome do bucket S3 criado.
@@ -150,3 +286,7 @@ Outputs:
   InstancePublicIp:
     Value: !GetAtt PipelineInstance.PublicIp
     Description: IP público da instância EC2.
+
+  StreamlitInstancePublicIp:
+    Value: !GetAtt StreamlitInstance.PublicIp
+    Description: IP público da instância EC2 que roda o Streamlit app.

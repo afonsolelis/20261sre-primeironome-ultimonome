@@ -31,6 +31,14 @@ Projeto AWS com CloudFormation para pipeline de leitura S3 usando EC2.
 
 4. Após o deploy, verifique os outputs do CloudFormation para obter o bucket S3 e o IP público da EC2.
 
+## Streamlit de teste
+
+Esta stack também cria uma segunda instância EC2 que executa um app Streamlit simples.
+
+- O Streamlit é exposto via Application Load Balancer público em `http://<StreamlitLoadBalancerDNS>`.
+- A instância de Streamlit recebe acesso de `8501` apenas do ALB, não diretamente da internet.
+- O app de teste está em `app/streamlit_app.py`
+
 ## Observações
 
 - A EC2 utiliza uma role com permissão de leitura no bucket S3.
