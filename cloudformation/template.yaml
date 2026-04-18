@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Esta stack cria um bucket S3 e uma instância EC2 com role para leitura de objetos no bucket.
+
+Parameters:
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+    Description: Nome do instance profile IAM existente para a EC2.
+  KeyName:
+    Type: String
+    Default: ''
+    Description: Nome do key pair opcional para acessar a instância EC2 por SSH.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+Conditions:
+  UseKeyPair: !Not [ !Equals [ !Ref KeyName, '' ] ]
+
+Resources:
+  PipelineVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: studentlab-pipeline-vpc
+
+  PipelineSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PipelineVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: studentlab-pipeline-subnet
+
+  PipelineInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: studentlab-pipeline-igw
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref PipelineVPC
+      InternetGatewayId: !Ref PipelineInternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref PipelineVPC
+      Tags:
+        - Key: Name
+          Value: studentlab-pipeline-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref PipelineInternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PipelineSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acesso SSH opcional e trafego de saida para S3
+      VpcId: !Ref PipelineVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: studentlab-pipeline-sg
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  PipelineInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref EC2SecurityGroup
+          SubnetId: !Ref PipelineSubnet
+      IamInstanceProfile: !Ref InstanceProfileName
+      ImageId: !Ref LatestAmiId
+      KeyName: !If [ UseKeyPair, !Ref KeyName, !Ref AWS::NoValue ]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y python3
+          pip3 install boto3
+          export PIPELINE_BUCKET='${S3Bucket}'
+          cat <<'EOF' >/home/ec2-user/read_s3.py
+          import boto3
+          import os
+          import logging
+
+          logging.basicConfig(filename='/var/log/read_s3.log', level=logging.INFO)
+          bucket = os.environ.get('PIPELINE_BUCKET')
+          s3 = boto3.client('s3')
+          response = s3.list_objects_v2(Bucket=bucket)
+          keys = [obj['Key'] for obj in response.get('Contents', [])] if response.get('Contents') else []
+          logging.info('S3 bucket %s contains %d objects', bucket, len(keys))
+          logging.info('Keys: %s', keys)
+          print('Script de leitura S3 executado. Veja /var/log/read_s3.log')
+          EOF
+          chmod +x /home/ec2-user/read_s3.py
+          python3 /home/ec2-user/read_s3.py
+
+Outputs:
+  BucketName:
+    Value: !Ref S3Bucket
+    Description: Nome do bucket S3 criado.
+
+  InstanceId:
+    Value: !Ref PipelineInstance
+    Description: ID da instância EC2.
+
+  InstancePublicIp:
+    Value: !GetAtt PipelineInstance.PublicIp
+    Description: IP público da instância EC2.
