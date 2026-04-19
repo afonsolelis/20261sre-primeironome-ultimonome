@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash scripts/deploy.sh)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Program Files/Amazon/**)",
+      "Bash(pip install *)",
+      "Bash(export PATH=\"/c/Python314/Scripts:$PATH\")",
+      "Bash(aws --version)",
+      "Bash(python -m awscli --version)"
+    ]
+  }
+}
